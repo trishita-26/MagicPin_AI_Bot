@@ -26,6 +26,18 @@ def metadata():
         ]
     }
 
+@app.get("/")
+def home():
+    return {
+        "message": "Magicpin AI Bot is live 🚀",
+        "endpoints": [
+            "/v1/healthz",
+            "/v1/metadata",
+            "/v1/context",
+            "/v1/tick",
+            "/v1/reply"
+        ]
+    }
 # Metadata
 @app.get("/v1/metadata")
 def metadata():
