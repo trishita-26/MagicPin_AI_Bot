@@ -113,7 +113,7 @@ Main abhi ek optimized post + offer draft kar rahi hoon — approve kar dena, we
 Live URL:
 
 ```
-https://your-render-url.onrender.com
+[https://your-render-url.onrender.com](https://magicpin-ai-bot.onrender.com)
 ```
 
 ---
