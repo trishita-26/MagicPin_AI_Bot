@@ -10,21 +10,6 @@ MERCHANTS = {}
 TRIGGERS = {}
 CUSTOMERS = {}
 
-# Health check
-@app.get("/v1/metadata")
-def metadata():
-    return {
-        "team_name": "Trisita_AI",
-        "model": "openrouter",
-        "description": "LLM-powered merchant engagement bot with contextual trigger-based messaging",
-        "capabilities": [
-            "trigger-based messaging",
-            "merchant personalization",
-            "category-aware tone",
-            "auto-reply detection",
-            "hostility handling"
-        ]
-    }
 
 @app.get("/")
 def home():
@@ -38,12 +23,28 @@ def home():
             "/v1/reply"
         ]
     }
+
+# Health check
+@app.get("/v1/healthz")
+def healthz():
+    return {
+        "status": "ok"
+    }
+
 # Metadata
 @app.get("/v1/metadata")
 def metadata():
     return {
         "team_name": "Trisita_AI",
-        "model": "openrouter"
+        "model": "openrouter",
+        "description": "LLM-powered merchant engagement bot with contextual trigger-based messaging",
+        "capabilities": [
+            "trigger-based messaging",
+            "merchant personalization",
+            "category-aware tone",
+            "auto-reply detection",
+            "hostility handling"
+        ]
     }
 
 #  Context ingestion
