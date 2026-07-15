@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import time
 """
 magicpin AI Challenge — LLM-Powered Judge Simulator
 ====================================================
@@ -39,7 +40,7 @@ LLM_MODEL = ""  # <-- Optional: specify model or leave empty for default
 OLLAMA_URL = "http://localhost:11434"
 
 # Which test to run by default
-TEST_SCENARIO = "all"
+TEST_SCENARIO = "full_evaluation"
 
 # =============================================================================
 # ██████  END OF CONFIGURATION - DON'T EDIT BELOW THIS LINE ██████
@@ -272,12 +273,15 @@ class GroqProvider(LLMProvider):
             "https://api.groq.com/openai/v1/chat/completions",
             data=json.dumps({"model": self.model, "messages": messages,
                             "temperature": 0.2, "max_tokens": 500}).encode("utf-8"),
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "python-requests/2.31.0"
+            }
         )
         resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
         data = json.loads(resp.read().decode("utf-8"))
         return data["choices"][0]["message"]["content"]
-
 
 class OllamaProvider(LLMProvider):
     def __init__(self, model: str = "", api_url: str = ""):
@@ -821,6 +825,7 @@ class JudgeSimulator:
 
             if err:
                 print_warn(f"Tick failed: {err}")
+                time.sleep(3)
                 continue
 
             actions = data.get("actions", [])
@@ -828,9 +833,11 @@ class JudgeSimulator:
 
             for action in actions:
                 self._score_and_display(action, verbose=False)
+                time.sleep(8)   # wait between each Groq scoring call
+
+            time.sleep(3)   # extra pause between batches
 
         return True
-
     def _score_and_display(self, action: Dict, verbose: bool = True):
         """Score an action and display results."""
         tid = action.get("trigger_id", "")

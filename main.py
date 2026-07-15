@@ -404,7 +404,7 @@ def _rule_based_reply(msg: str, from_role: str, merchant_name: str, last_cta: st
         return {
             "action": "send",
             "body": (
-                "Perfect — drafting your optimized post + offer right now. 30 seconds ⏳\n\n"
+                "Perfect -- drafting your optimized post + offer right now. 30 seconds...\n\n"
                 "Ek baar ready ho jaye toh aap directly approve karke live push kar sakte hain."
             ),
             "cta": "approve_draft",
@@ -416,7 +416,7 @@ def _rule_based_reply(msg: str, from_role: str, merchant_name: str, last_cta: st
             "body": (
                 "Valid question — quickly explain karta hoon.\n\n"
                 "Aapke CTR data aur category benchmarks dekh ke yeh ek high-ROI move hai. "
-                "Koi extra budget nahi lagega.\n\nProceed karoon? ✅ / ❌"
+                "Koi extra budget nahi lagega.\n\nProceed karoon? YES / NO"
             ),
             "cta": "yes_no",
             "rationale": "Merchant asked a question; providing context and re-offering the action.",
@@ -424,7 +424,7 @@ def _rule_based_reply(msg: str, from_role: str, merchant_name: str, last_cta: st
     if _contains_any(msg, NEGATIVE_SIGNALS):
         return {
             "action": "send",
-            "body": "Understood! Koi pressure nahi. 🙏\nJab bhi ready ho, main hoon. Tab tak aapki listing monitor karti rehungi.",
+            "body": "Understood! Koi pressure nahi.\nJab bhi ready ho, main hoon. Tab tak aapki listing monitor karti rehungi.",
             "cta": "none",
             "rationale": "Merchant declined; acknowledging and gracefully standing by.",
         }
@@ -432,7 +432,7 @@ def _rule_based_reply(msg: str, from_role: str, merchant_name: str, last_cta: st
         return {
             "action": "send",
             "body": (
-                "Got it — noted. 📝\n\n"
+                "Got it -- noted.\n\n"
                 "Main is context ke saath ek targeted plan draft karti hoon. "
                 "Proceed karoon?"
             ),
