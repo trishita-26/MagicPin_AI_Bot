@@ -380,14 +380,21 @@ def _rule_based_reply(msg: str, from_role: str, merchant_name: str, last_cta: st
     """Deterministic fallback reply."""
     if from_role == "customer":
         if _contains_any(msg, CUSTOMER_BOOKING):
+            import re
+            day_match = re.search(
+                r'\b(mon|tue|wed|thu|fri|sat|sun)\w*\b.{0,20}?\d{1,2}\s*(am|pm|:\d{2})?',
+                msg, re.IGNORECASE
+            )
+            time_ref = day_match.group(0) if day_match else None
+            slot_line = f" for {time_ref}" if time_ref else ""
             return {
                 "action": "send",
                 "body": (
-                    f"✅ Done! Your appointment request has been noted.\n\n"
-                    f"{merchant_name} will confirm your exact slot shortly — usually within the hour."
+                    f"✅ Done! Your appointment request{slot_line} has been noted.\n\n"
+                    f"{merchant_name} will confirm shortly — usually within the hour."
                 ),
                 "cta": "none",
-                "rationale": "Customer expressed booking intent; confirming receipt and next step.",
+                "rationale": "Customer expressed booking intent with specific date/time; echoing back the specific slot rather than generic confirmation.",
             }
         if _contains_any(msg, CUSTOMER_AFFIRMATIVE):
             return {
@@ -412,7 +419,9 @@ def _rule_based_reply(msg: str, from_role: str, merchant_name: str, last_cta: st
         }
 
     # Merchant branch
-    if _contains_any(msg, MERCHANT_COMMIT):
+    is_short_commit = len(msg.split()) <= 3 and _contains_any(msg, MERCHANT_COMMIT)
+
+    if is_short_commit:
         return {
             "action": "send",
             "body": (
@@ -421,6 +430,17 @@ def _rule_based_reply(msg: str, from_role: str, merchant_name: str, last_cta: st
             ),
             "cta": "approve_draft",
             "rationale": "Merchant committed; moving to action phase immediately.",
+        }
+
+    if _contains_any(msg, MERCHANT_COMMIT) and len(msg.split()) > 3:
+        return {
+            "action": "send",
+            "body": (
+                "Noted — got the details on that. Let me look into it and get back with "
+                "specifics shortly. In the meantime, proceed with the draft? Go?"
+            ),
+            "cta": "yes_no",
+            "rationale": "Merchant provided substantive technical content alongside commit language; acknowledging specifics before proceeding rather than jumping to generic response.",
         }
     if _contains_any(msg, MERCHANT_QUESTION) or "?" in msg:
         return {
