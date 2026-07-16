@@ -134,9 +134,18 @@ def push_context(data: Dict[str, Any]):
 @app.post("/v1/tick")
 def tick(data: Dict[str, Any]):
     available_triggers: List[str] = data.get("available_triggers", [])
+
+    
+    # Sort by urgency descending so the highest-priority trigger fires first
+    def _urgency(tid: str) -> int:
+        t = _get_payload("trigger", tid)
+        return t.get("urgency", 0) if t else 0
+
+    sorted_triggers = sorted(available_triggers, key=_urgency, reverse=True)
     actions = []
 
-    for tid in available_triggers:
+
+    for tid in sorted_triggers:
         trigger = _get_payload("trigger", tid)
         if not trigger:
             continue
@@ -207,6 +216,9 @@ def tick(data: Dict[str, Any]):
             "suppression_key":  suppression_key,
             "rationale":        result.get("rationale", ""),
         })
+
+        # ── ONE action per tick — keeps response under 5s, within judge timeout ─
+        break
 
     return {"actions": actions}
 
