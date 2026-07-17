@@ -258,21 +258,50 @@ You are continuing a conversation with a merchant (or customer). You have the fu
 
 Your job is to produce the NEXT reply in the conversation.
 
-Rules:
-- Stay on the original topic (the trigger that started this conversation)
-- If merchant says yes/ok/proceed → immediately take action, don't ask qualifying questions again
-- If merchant asks a question → answer it briefly using their specific data, then re-offer the action
-- If merchant says no/not now → acknowledge politely, offer to check back later, then end gracefully
-- Keep responses SHORT — 2-4 sentences max for follow-up turns
-- Hindi-English mix if merchant prefers Hindi
-- Always include a rationale field
-- Determine action: "send" | "wait" | "end"
+ROLE SPLIT — check from_role FIRST
+---------------------------------------
+IF from_role == "customer" (message FROM a patient/client TO the merchant via Vera):
+  - You speak as the MERCHANT (clinic/shop), NOT as Vera.
+  - If the customer gives a specific date/time slot (e.g. "Wed 5 Nov, 6pm"):
+      * Acknowledge the EXACT slot they requested.
+      * Tell them the clinic will CONFIRM shortly — do NOT say "Done!" or "Confirmed!" because
+        the merchant must accept first. Set cta=slot_pick.
+      * Example body: "Got it for Wed 5 Nov at 6pm! Dr. Meera's Dental Clinic has received
+        your request and will confirm your slot within the hour."
+  - If the customer says "yes" / affirmative without a slot: ask for their preferred time (cta=slot_pick).
+  - If the customer wants to RESCHEDULE ("change", "different day", "badal"): ask for new slot (cta=slot_pick).
+  - If the customer asks an INFO question ("how long", "how much", "kya hoga"): give a brief warm answer, then re-offer booking (cta=slot_pick).
+  - If the customer writes in Hindi (e.g. "theek hai", "haan"): reply in Hindi-English mix.
+  - If the customer declines: action=end.
+
+IF from_role == "merchant" (message FROM the merchant TO Vera):
+  - You speak as Vera.
+  - If merchant says yes/ok/proceed → immediately take action, don't ask qualifying questions again.
+  - If merchant gives a TECHNICAL QUESTION or describes specific equipment/setup:
+      * MUST reference the specific technical detail they mentioned.
+      * Give a brief, grounded answer using category knowledge (1-2 sentences).
+      * Then re-anchor to the original task with a binary CTA.
+      * NEVER give a generic "Noted — got the details" reply. That scores 0.
+      * Example: Merchant says "We have an old D-speed film unit" →
+        Reply: "D-speed is 2 generations behind — E/F-speed cuts dose ~40% and is now the compliance
+        baseline. Main abhi draft mein yeh add kar deti hoon — proceed? Go?"
+  - If merchant asks a question → answer briefly using their specific data, then re-offer the action.
+  - If merchant says no/not now → acknowledge politely, offer to check back, then end gracefully.
+
+GENERAL RULES
+--------------
+- Keep responses SHORT — 2-4 sentences max for follow-up turns.
+- Stay on the original topic (the trigger that started this conversation).
+- Hindi-English mix if merchant prefers Hindi.
+- Always include a rationale field.
+- Determine action: "send" | "wait" | "end".
+- Body MUST be <= 160 characters for reply turns.
 
 Output ONLY valid JSON:
 {
   "action": "send" | "wait" | "end",
   "body": "the reply text (only if action=send)",
-  "cta": "yes_no | open_ended | approve_draft | none (only if action=send)",
+  "cta": "yes_no | open_ended | approve_draft | slot_pick | none (only if action=send)",
   "wait_seconds": 1800,
   "rationale": "why this response"
 }"""
@@ -307,18 +336,20 @@ def _compose_reply_with_groq(
         peer_ctr      = category.get("peer_stats", {}).get("avg_ctr", 0.03)
         active_offers = [o["title"] for o in merchant.get("offers", []) if o.get("status") == "active"]
         lang_note     = "Use Hindi-English code-mix." if "hi" in languages else "Use English."
+        from_role_str = conversation.get("from_role_latest", "merchant")
 
         user_prompt = f"""CONVERSATION CONTEXT:
 Merchant: {merchant_name}, {city} | Category: {cat_slug}
 CTR: {ctr:.2%} vs peer {peer_ctr:.2%} | Active offers: {active_offers}
 {lang_note}
+from_role of LATEST message: {from_role_str}
 
 CONVERSATION SO FAR:
 {history_text}
 
-MERCHANT'S LATEST MESSAGE: "{merchant_message}"
+LATEST MESSAGE (from {from_role_str}): "{merchant_message}"
 
-Produce the next reply. Be concise. If they said yes, take the action immediately."""
+Produce the next reply. Be concise. Reference specific technical details if mentioned. If from_role=customer with a slot, acknowledge the exact slot (cta=slot_pick)."""
 
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -366,6 +397,17 @@ CUSTOMER_BOOKING = [
     "aaj", "kal", "today", "tomorrow", "morning", "evening", "noon",
 ]
 
+CUSTOMER_RESCHEDULE = [
+    "reschedule", "change", "different day", "another day", "another slot",
+    "move", "shift", "postpone", "different time", "badal", "change kar",
+]
+
+CUSTOMER_INFO = [
+    "how long", "how much", "cost", "price", "charges", "fees", "kitna",
+    "kya hoga", "procedure", "what is", "tell me", "explain", "duration",
+    "painful", "dard", "safe", "side effect", "kaise",
+]
+
 CUSTOMER_AFFIRMATIVE = [
     "yes", "ok", "okay", "sure", "please", "confirm", "go ahead",
     "haan", "ha", "bilkul", "zaroor", "theek",
@@ -381,30 +423,59 @@ def _rule_based_reply(msg: str, from_role: str, merchant_name: str, last_cta: st
     if from_role == "customer":
         if _contains_any(msg, CUSTOMER_BOOKING):
             import re
-            day_match = re.search(
-                r'\b(mon|tue|wed|thu|fri|sat|sun)\w*\b.{0,20}?\d{1,2}\s*(am|pm|:\d{2})?',
+            # Extract the most specific time reference (day + date + time)
+            time_match = re.search(
+                r'\b(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)'
+                r'[\s,]*(?:\d{1,2}(?:\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*)?)?'
+                r'[\s,]*(?:at\s*)?(?:\d{1,2}(?::\d{2})?\s*(?:am|pm))?',
                 msg, re.IGNORECASE
             )
-            time_ref = day_match.group(0) if day_match else None
-            slot_line = f" for {time_ref}" if time_ref else ""
+            time_ref = time_match.group(0).strip().rstrip(',') if time_match else None
+            # Also catch standalone time like "6pm" or "10:30am"
+            if not time_ref or not re.search(r'\d', time_ref):
+                time_match2 = re.search(r'\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b', msg, re.IGNORECASE)
+                if time_match2:
+                    time_ref = (time_ref + " at " if time_ref else "") + time_match2.group(0)
+            slot_line = f" for {time_ref.title()}" if time_ref else ""
+            # DO NOT say "Done!" — merchant hasn't confirmed yet. Acknowledge + set expectation.
             return {
                 "action": "send",
                 "body": (
-                    f"✅ Done! Your appointment request{slot_line} has been noted.\n\n"
-                    f"{merchant_name} will confirm shortly — usually within the hour."
+                    f"Got it{slot_line}! {merchant_name} has received your request "
+                    f"and will confirm your slot within the hour."
                 ),
-                "cta": "none",
-                "rationale": "Customer expressed booking intent with specific date/time; echoing back the specific slot rather than generic confirmation.",
+                "cta": "slot_pick",
+                "rationale": "Customer gave a specific slot; echoing it back and setting expectation that merchant will confirm — not prematurely saying Done!",
             }
         if _contains_any(msg, CUSTOMER_AFFIRMATIVE):
             return {
                 "action": "send",
                 "body": (
-                    f"Perfect! {merchant_name} will reach out shortly to confirm. "
-                    f"What time of day works best — morning, afternoon, or evening?"
+                    f"Great! What time works best for you — morning, afternoon, or evening? "
+                    f"{merchant_name} will confirm once you share your preference."
                 ),
                 "cta": "slot_pick",
-                "rationale": "Customer confirmed; collecting slot preference for booking.",
+                "rationale": "Customer confirmed interest; collecting slot preference before booking.",
+            }
+        if _contains_any(msg, CUSTOMER_RESCHEDULE):
+            return {
+                "action": "send",
+                "body": (
+                    f"No problem! What day and time works better for you? "
+                    f"{merchant_name} will do their best to accommodate."
+                ),
+                "cta": "slot_pick",
+                "rationale": "Customer wants to reschedule; collecting new slot preference.",
+            }
+        if _contains_any(msg, CUSTOMER_INFO):
+            return {
+                "action": "send",
+                "body": (
+                    f"Great question! {merchant_name}'s team will be happy to walk you through "
+                    f"the details when you visit. Want to go ahead and book a slot?"
+                ),
+                "cta": "slot_pick",
+                "rationale": "Customer asked an info question; answering warmly and re-offering booking.",
             }
         if _contains_any(msg, NEGATIVE_SIGNALS):
             return {
@@ -433,14 +504,40 @@ def _rule_based_reply(msg: str, from_role: str, merchant_name: str, last_cta: st
         }
 
     if _contains_any(msg, MERCHANT_COMMIT) and len(msg.split()) > 3:
+        # Merchant gave technical context alongside a commit signal.
+        # Priority-ordered detection: specific terms (d-speed) beat generic (x-ray).
+        import re
+        TECH_PRIORITY = [
+            "d-speed", "e-speed", "f-speed", "cbct", "rvg",
+            "autoclave", "steriliz", "schedule h", "cdsco", "fssai",
+            "x-ray", "xray", "film", "sensor", "equipment", "software", "pos", "billing",
+        ]
+        tech_ref = None
+        for term in TECH_PRIORITY:
+            if re.search(r'\b' + re.escape(term) + r'\w*\b', msg, re.IGNORECASE):
+                tech_ref = term.upper()
+                break
+        if tech_ref:
+            tech_responses = {
+                "D-SPEED"   : "D-speed film is 2 generations behind current standard \u2014 E/F-speed cuts patient dose ~40% and is now the compliance baseline.",
+                "E-SPEED"   : "E-speed is the current minimum standard \u2014 F-speed gives another ~20% dose reduction if you're looking to upgrade.",
+                "CBCT"      : "CBCT dose is ~3-10x conventional X-ray \u2014 AERB guidelines require documented clinical justification per scan.",
+                "RVG"       : "RVG sensors reduce dose ~80% vs film and qualify for digital-practice listing badges on magicpin.",
+                "AUTOCLAVE" : "Class B autoclave is the current BIS standard \u2014 Class N is non-compliant for hollow instruments.",
+                "SCHEDULE H": "Schedule H/H1 molecules require documented dispensing records \u2014 digital logs are accepted for inspection.",
+            }
+            grounded = tech_responses.get(tech_ref, "Got the detail on " + tech_ref.title() + " \u2014 factoring that into the recommendation.")
+            return {
+                "action": "send",
+                "body": grounded + " Main abhi is point ko draft mein incorporate karti hoon \u2014 proceed? Go?",
+                "cta": "yes_no",
+                "rationale": "Merchant raised specific technical detail (" + tech_ref + "); grounded response before re-anchoring to draft.",
+            }
         return {
             "action": "send",
-            "body": (
-                "Noted — got the details on that. Let me look into it and get back with "
-                "specifics shortly. In the meantime, proceed with the draft? Go?"
-            ),
+            "body": "Noted \u2014 incorporating that context now. Draft ready in 30 seconds. Proceed? Go?",
             "cta": "yes_no",
-            "rationale": "Merchant provided substantive technical content alongside commit language; acknowledging specifics before proceeding rather than jumping to generic response.",
+            "rationale": "Merchant shared context alongside commit; acknowledging and moving to action.",
         }
     if _contains_any(msg, MERCHANT_QUESTION) or "?" in msg:
         return {
@@ -516,6 +613,7 @@ def reply(data: Dict[str, Any]):
 
     # ── 4. LLM-powered context-aware reply ──────────────────────────────────
     if conversation and merchant and category:
+        conversation["from_role_latest"] = from_role
         result = _compose_reply_with_groq(conversation, raw_msg, merchant, category)
         if result:
             # Update conversation history

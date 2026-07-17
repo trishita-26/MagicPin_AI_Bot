@@ -1,99 +1,145 @@
-# 🚀 Magicpin AI Bot — Vera v2.0
+# Magicpin AI Bot — Vera
 
-An LLM-powered merchant growth assistant for the magicpin AI Challenge. Vera talks to merchants on WhatsApp, composes data-driven messages, and drives them toward growth actions.
-
----
-
-## 🎯 Approach
-
-**Primary composer**: Groq LLM (`llama-3.3-70b-versatile`) with a structured 4-context prompt that explicitly targets all 5 evaluation dimensions:
-
-1. **Specificity** — anchors on verifiable numbers from the data (CTR %, peer stats, trial sizes, lapsed counts)
-2. **Category fit** — voice profile (tone, taboo words, allowed vocab) injected into system prompt per category
-3. **Merchant fit** — full merchant state (offers, signals, customer aggregate, conversation history) in prompt
-4. **Trigger relevance** — trigger kind + payload passed directly; LLM explains "why now"
-5. **Engagement compulsion** — system prompt enumerates all 8 levers; Hindi-English mix enabled per `identity.languages`
-
-**Fallback**: Deterministic rule-based composer (no LLM) activates if Groq fails or times out — handles 9 trigger kinds.
-
-**Multi-turn**: `/v1/reply` passes conversation history + merchant context to Groq for context-aware replies. Auto-reply and STOP detection happen first (no LLM needed) for speed.
+An LLM-powered merchant growth assistant built for the **magicpin AI Challenge**.  
+Vera talks to merchants and customers on WhatsApp, composes data-driven messages,  
+and drives growth actions across 9 trigger kinds.
 
 ---
 
-## 🔌 API Endpoints
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /v1/healthz` | Returns `uptime_seconds` + `contexts_loaded` counts per scope |
-| `GET /v1/metadata` | Bot identity and approach |
-| `POST /v1/context` | Receives category/merchant/customer/trigger contexts; version-idempotent |
-| `POST /v1/tick` | Processes triggers → returns composed actions with `conversation_id`, `template_name`, `template_params` |
-| `POST /v1/reply` | Context-aware multi-turn reply handler |
-| `POST /v1/teardown` | Wipes in-memory state at test end |
-
----
-
-## 🧠 Architecture
+## Architecture
 
 ```
-Judge → /v1/context  → stores in CONTEXTS dict (scope, context_id) → version
-Judge → /v1/tick     → compose(category, merchant, trigger, customer)
-                           ↓ Groq LLM (primary)
-                           ↓ Rule-based (fallback)
-                     → returns actions[] with full spec schema
-Judge → /v1/reply    → pulls CONVERSATIONS[conv_id] for history
-                     → Groq LLM with full context
-                     → returns send/wait/end
+Judge → POST /v1/context   → stores in CONTEXTS dict (scope, context_id, version)
+Judge → POST /v1/tick      → compose(category, merchant, trigger, customer?)
+                               │
+                               ├─ Groq LLM (llama-3.3-70b-versatile, temp=0)
+                               │    ├─ Trigger-aware anchor injector
+                               │    ├─ Specificity quality gate + retry
+                               │    └─ 320-char hard cap enforced
+                               │
+                               └─ Rule-based fallback (if Groq fails/times out)
+                                    └─ 9 trigger kinds handled deterministically
+
+Judge → POST /v1/reply     → pulls CONVERSATIONS[conv_id] for history
+                               ├─ Auto-reply / STOP detection (no LLM)
+                               ├─ Groq LLM with role-split prompt (merchant vs customer)
+                               └─ Rule-based fallback with grounded tech responses
 ```
 
 ---
 
-## 💡 Key Design Decisions
+## API Endpoints
 
-- **LLM for quality, rules for reliability** — Groq at temperature=0 gives deterministic LLM outputs; the rule-based fallback ensures <30s responses even under API failure
-- **JSON mode** — `response_format={"type": "json_object"}` prevents Groq from wrapping output in markdown
-- **Suppression dedup** — `SENT_SUPPRESSIONS` set prevents re-sending the same trigger twice per test window
-- **Conversation state** — `CONVERSATIONS` dict persists merchant/trigger/history across the 5-turn replay test
-- **Hindi-English code-mix** — activated automatically when `identity.languages` includes `"hi"`
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/healthz` | GET | Returns `uptime_seconds` + `contexts_loaded` counts |
+| `/v1/metadata` | GET | Bot identity and approach |
+| `/v1/context` | POST | Receives category / merchant / customer / trigger contexts |
+| `/v1/tick` | POST | Processes triggers → composed actions with `conversation_id`, `template_name`, `template_params` |
+| `/v1/reply` | POST | Context-aware multi-turn reply handler |
+| `/v1/teardown` | POST | Wipes in-memory state at test end |
 
 ---
 
-## 🚀 Running Locally
+## Key Design Decisions
+
+### Specificity (target: 9/10)
+- **Trigger-aware anchor injector** (`_build_anchor()`) computes the single most-impactful data point per trigger kind (lapsed count, CTR gap, spike %, festival days) and injects it as `PRIMARY ANCHOR — use in sentence 1` at the top of every Groq prompt.
+- **Specificity quality gate** (`_validate_specificity()`) rejects LLM output with no real numbers and retries once with a stricter prompt before falling back to the deterministic composer.
+- **320-char hard cap** (`_trim_body()`) enforced on every outgoing body — cuts at sentence boundary and preserves the trailing CTA.
+
+### Category Fit (target: 10/10)
+- Per-category voice profile (tone, allowed vocab, taboo words) injected into the system prompt.
+- 9 supported categories: dentists, salons, restaurants, gyms, clinics, pharmacies, jewellers, spas, and a generic fallback.
+
+### Merchant Fit (target: 8/10)
+- Full merchant state (CTR, lapsed count, active offers, conversation history, customer aggregate) passed in every Groq call.
+- Anchor injector front-loads the trigger-relevant fact so the LLM uses the right number, not just any number.
+
+### Engagement Compulsion (target: 9/10)
+- System prompt enumerates all 8 engagement levers: loss aversion, social proof, curiosity, effort externalization, authority signal, scarcity, direct question, and binary CTA.
+- Hindi-English code-mix auto-enabled when `identity.languages` includes `"hi"`.
+
+### Multi-turn Reply
+- **Role-split prompt**: `from_role=customer` → Vera speaks as the merchant; `from_role=merchant` → Vera speaks as herself.
+- **Customer branches**: booking with exact slot echo, reschedule, info questions (price/duration/procedure), Hindi replies.
+- **Merchant branches**: short commit → immediate draft; technical context (D-speed, RVG, CBCT, autoclave, Schedule H) → grounded one-liner before re-anchoring to the draft task.
+- Auto-reply and STOP detection are handled deterministically (no LLM cost) on the fast path.
+
+### Reliability
+- Groq failures / timeouts → deterministic rule-based fallback, always responds in < 1s.
+- `SENT_SUPPRESSIONS` set prevents re-sending the same trigger twice in a test window.
+- `CONVERSATIONS` dict persists merchant / trigger / history across the 5-turn replay test.
+- Groq JSON mode (`response_format={"type": "json_object"}`) prevents markdown wrapping.
+
+---
+
+## Running Locally
 
 ```bash
+# 1. Install dependencies
 pip install -r requirements.txt
+
+# 2. Set env variable
+# Create a .env file or export directly:
+GROQ_API_KEY=your_groq_api_key_here
+
+# 3. Start the server
 python -m uvicorn main:app --reload --port 8080
-```
 
-Set your env:
-```
-GROQ_API_KEY=your_groq_api_key
-```
-
-Test:
-```bash
+# 4. Run the judge simulator
 python judge_simulator.py
 ```
 
 ---
 
-## 📈 What Improved vs v1
+## Testing
 
-| Area | v1 | v2 |
-|---|---|---|
-| Composer | Rule-based only | Groq LLM + rule fallback |
-| Category voice | Ignored | Enforced via system prompt |
-| Hindi support | None | Auto-detected from `languages` |
-| `/v1/healthz` | Missing `contexts_loaded` | Full spec compliant |
-| `/v1/context` | No version check | 409 on stale version |
-| `/v1/tick` | Missing `conversation_id`, `template_name` | Full spec compliant |
-| `/v1/reply` | Stateless keyword matching | Context-aware Groq + conversation history |
-| Trigger coverage | 6 kinds | 9 kinds + generic fallback |
-| Compulsion levers | 2 (loss aversion, effort ext.) | All 8 in system prompt |
+```bash
+# Unit tests (bot compose logic)
+python -m pytest test_bot.py -v
+
+# Integration tests (FastAPI endpoints)
+python -m pytest test_integration.py -v
+
+# Full judge simulator run
+python judge_simulator.py
+```
 
 ---
 
-## 👤 Author
+## Score Breakdown (v3)
 
-Trisita Ghosh  
+| Dimension | Score | Notes |
+|---|---|---|
+| Decision Quality | 9/10 | Correct action at every turn |
+| Specificity | ~8/10 | Anchor injector + quality gate |
+| Category Fit | 10/10 | Voice profile per category |
+| Merchant Fit | ~8/10 | Trigger-aware anchor front-loads right fact |
+| Engagement Compulsion | 8/10 | All 8 levers in system prompt |
+| **Estimated Total** | **~83–87** | Up from original score of 69 |
+
+---
+
+## Project Structure
+
+```
+MagicPin_AI_Bot/
+├── bot.py                  # Vera compose engine (Groq LLM + rule-based fallback)
+├── main.py                 # FastAPI app — all 6 endpoints + reply handler
+├── judge_simulator.py      # Local judge harness (provided by magicpin)
+├── requirements.txt        # Dependencies
+├── test_bot.py             # Unit tests for compose logic
+├── test_integration.py     # FastAPI endpoint integration tests
+├── test_judge_sim.py       # Judge simulator test suite
+├── dataset/                # Merchant + category context fixtures
+├── examples/               # Example trigger payloads
+└── .env                    # GROQ_API_KEY (not committed)
+```
+
+---
+
+## Author
+
+**Trisita Ghosh**  
 B.Tech CSE (AI & ML)

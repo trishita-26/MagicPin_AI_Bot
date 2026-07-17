@@ -26,6 +26,173 @@ def _get_groq():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# BODY LENGTH ENFORCEMENT — hard 320-char cap (non-negotiable per rubric)
+# ──────────────────────────────────────────────────────────────────────────────
+
+MAX_BODY_CHARS = 320
+
+def _trim_body(body: str) -> str:
+    """
+    Enforce the 320-character hard limit on every outgoing body.
+    Strategy:
+      1. If already within limit -> return as-is.
+      2. Try to cut at the last sentence-ending punctuation (. ! ?) before the limit.
+      3. If no sentence boundary found -> hard-cut at 317 and append '...'.
+    The CTA (Go? / Proceed?) is preserved where possible.
+    """
+    if len(body) <= MAX_BODY_CHARS:
+        return body
+
+    # Try sentence-boundary cut
+    window = body[:MAX_BODY_CHARS]
+    last_punct = max(
+        window.rfind('. '),
+        window.rfind('! '),
+        window.rfind('? '),
+        window.rfind('.\n'),
+        window.rfind('!\n'),
+        window.rfind('?\n'),
+    )
+    if last_punct > MAX_BODY_CHARS // 2:          # only cut if we keep >half
+        trimmed = body[:last_punct + 1].rstrip()
+        # Re-append CTA if the original ended with Go?/Proceed?/Reply YES?
+        for cta_token in ("Go?", "Proceed?", "Reply YES?"):
+            if body.rstrip().endswith(cta_token) and not trimmed.endswith(cta_token):
+                if len(trimmed) + 1 + len(cta_token) <= MAX_BODY_CHARS:
+                    trimmed = trimmed + " " + cta_token
+                break
+        return trimmed
+
+    # Hard cut
+    return body[:317] + "..."
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SPECIFICITY QUALITY GATE
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Fictional identifiers from few-shot examples — must never leak into real output.
+# Only block strings that are obviously fabricated (example biz names, fake localities).
+# Do NOT block real numeric patterns like "1.8%" — those could be genuine merchant data.
+_EXAMPLE_FICTIONAL = [
+    "BaristaCo", "Andheri East Cafe", "Koramangala Branch",
+    "47 of your top clients", "23 loyal clients",
+    "94,000 impressions",
+]
+
+def _validate_specificity(body: str) -> bool:
+    """
+    Returns True if the body has at least one digit AND does not contain
+    obviously fabricated example identifiers from the system-prompt few-shots.
+    """
+    import re
+    if not re.search(r'\d', body):
+        return False
+    for ex in _EXAMPLE_FICTIONAL:
+        if ex in body:
+            return False
+    return True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TRIGGER-AWARE ANCHOR INJECTOR
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _build_anchor(trigger_kind: str, merchant: dict, category: dict,
+                  trigger_payload: dict) -> str:
+    """
+    Compute the single most-impactful data point for this trigger and return
+    a short instruction block to inject at the top of the user prompt.
+    Forces the LLM to use real merchant numbers in sentence 1.
+    """
+    perf      = merchant.get("performance", {})
+    cust_agg  = merchant.get("customer_aggregate", {})
+    identity  = merchant.get("identity", {})
+    peer_stats= category.get("peer_stats", {})
+    signals   = merchant.get("signals", [])
+
+    ctr        = perf.get("ctr", 0)
+    peer_ctr   = peer_stats.get("avg_ctr", 0.03)
+    lapsed     = cust_agg.get("lapsed_180d_plus", 0)
+    rating     = perf.get("rating", 0)
+    peer_rating= peer_stats.get("avg_rating", 4.2)
+    views_delta= perf.get("delta_7d", {}).get("views_pct", 0)
+    owner      = identity.get("owner_first_name", "")
+    city       = identity.get("city", "")
+    cat_slug   = category.get("slug", "")
+    missed     = int(max(peer_ctr - ctr, 0) * 1000)
+
+    if trigger_kind == "research_digest":
+        top_id  = trigger_payload.get("top_item_id")
+        digest  = category.get("digest", [])
+        item    = next((d for d in digest if d.get("id") == top_id), digest[0] if digest else {})
+        source  = item.get("source", "")
+        seg     = item.get("patient_segment", "").replace("_", " ")
+        anchor  = (
+            f"PRIMARY ANCHOR — use in sentence 1:\n"
+            f"  Source just published: '{source}'\n"
+            f"  Lapsed patients in target segment: {lapsed} ({seg} cohort)\n"
+            f"  CTR gap: {ctr:.2%} vs {peer_ctr:.2%} peer ({missed} missed clicks/1k views)\n"
+            f"  INSTRUCTION: Open with the publication name + the {lapsed} lapsed patients number."
+        )
+    elif trigger_kind == "perf_dip":
+        anchor = (
+            f"PRIMARY ANCHOR — use in sentence 1:\n"
+            f"  CTR: {ctr:.2%} vs peer avg {peer_ctr:.2%} = {missed} missed clicks per 1k views\n"
+            f"  Lapsed: {lapsed} {cat_slug[:-1] if cat_slug.endswith('s') else cat_slug}s haven't returned\n"
+            f"  INSTRUCTION: Open with the exact CTR number and missed-clicks count."
+        )
+    elif trigger_kind == "perf_spike":
+        anchor = (
+            f"PRIMARY ANCHOR — use in sentence 1:\n"
+            f"  Views spike this week: +{views_delta:.0%} above 30-day average\n"
+            f"  Current CTR: {ctr:.2%} (peer: {peer_ctr:.2%}) — not converting the spike yet\n"
+            f"  INSTRUCTION: Open with the exact % spike figure."
+        )
+    elif trigger_kind in ("low_rating", "perf_dip"):
+        peer_gap = round(peer_rating - rating, 1) if rating > 0 else 0
+        anchor = (
+            f"PRIMARY ANCHOR — use in sentence 1:\n"
+            f"  Rating: {rating}★ vs peer avg {peer_rating}★ in {city} (gap: {peer_gap} points)\n"
+            f"  Lapsed {cat_slug}: {lapsed}\n"
+            f"  INSTRUCTION: Open with the exact rating gap and lapsed count."
+        )
+    elif trigger_kind == "festival_upcoming":
+        festival  = trigger_payload.get("festival_name", "upcoming festival")
+        days_away = trigger_payload.get("days_away", "")
+        anchor = (
+            f"PRIMARY ANCHOR — use in sentence 1:\n"
+            f"  Festival: {festival} is {days_away} days away\n"
+            f"  Lapsed {cat_slug}: {lapsed} — prime re-engagement audience\n"
+            f"  INSTRUCTION: Open with festival name + exact days away."
+        )
+    elif trigger_kind == "recall_due":
+        anchor = (
+            f"PRIMARY ANCHOR — write as the merchant TO the customer:\n"
+            f"  Reference their last service and preferred slot exactly.\n"
+            f"  Do NOT mention Vera or magicpin. This is a clinic message."
+        )
+    elif trigger_kind == "dormant_with_vera":
+        dormant = trigger_payload.get("days_dormant", "")
+        anchor = (
+            f"PRIMARY ANCHOR — use in sentence 1:\n"
+            f"  Days since last contact: {dormant}\n"
+            f"  CTR: {ctr:.2%} vs {peer_ctr:.2%} peer ({missed} missed clicks/1k)\n"
+            f"  INSTRUCTION: Open with the exact dormant-days figure."
+        )
+    else:
+        # Generic anchor — always at least surface the CTR gap
+        anchor = (
+            f"PRIMARY ANCHOR — use a concrete number in sentence 1:\n"
+            f"  CTR: {ctr:.2%} vs {peer_ctr:.2%} peer = {missed} missed clicks/1k views\n"
+            f"  Lapsed: {lapsed}\n"
+        )
+
+    return anchor + "\n\n"
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # SYSTEM PROMPT — the judge rubric is baked in
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -273,8 +440,12 @@ def _build_user_prompt(category: dict, merchant: dict, trigger: dict, customer: 
     # ── Offer list (safe, no nested f-string) ────────────────────────────────
     all_offers_list = [o.get("title", "") + " (" + o.get("status", "") + ")" for o in offers]
 
+    # ── Trigger-aware anchor (forces real numbers into sentence 1) ─────────
+    anchor_block = _build_anchor(trigger_kind, merchant, category, trigger_payload)
+
     prompt = (
         "Compose a WhatsApp message for this merchant.\n\n"
+        f"{anchor_block}"
         f"TRIGGER EVENT:\n"
         f"- Kind: {trigger_kind}\n"
         f"- Urgency (1-5): {urgency}\n"
@@ -336,6 +507,38 @@ def _compose_with_groq(category: dict, merchant: dict, trigger: dict, customer: 
         if not result.get("body") or not result.get("cta"):
             logger.warning("Groq returned incomplete JSON: %s", raw)
             return None
+
+        # Enforce 320-char hard cap
+        result["body"] = _trim_body(result["body"])
+
+        # ── Specificity quality gate — retry once if output is vague ────────
+        if not _validate_specificity(result["body"]):
+            logger.warning("Specificity check failed; retrying with stricter prompt")
+            stricter_msg = (
+                "Your previous response was too vague — it contained no specific numbers. "
+                "Rewrite using ONLY concrete figures from the PRIMARY ANCHOR above. "
+                "Every sentence must reference an actual number (CTR, lapsed count, days, etc.)."
+            )
+            try:
+                retry_response = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {"role": "system",    "content": SYSTEM_PROMPT},
+                        {"role": "user",      "content": user_prompt},
+                        {"role": "assistant", "content": raw},
+                        {"role": "user",      "content": stricter_msg},
+                    ],
+                    temperature=0,
+                    max_tokens=600,
+                    response_format={"type": "json_object"},
+                )
+                retry_raw = retry_response.choices[0].message.content.strip()
+                retry_result = json.loads(retry_raw)
+                if retry_result.get("body"):
+                    retry_result["body"] = _trim_body(retry_result["body"])
+                    result = retry_result
+            except Exception as retry_exc:
+                logger.warning("Specificity retry also failed: %s", retry_exc)
 
         # Always populate suppression_key from trigger
         result["suppression_key"] = trigger.get("suppression_key", "")
